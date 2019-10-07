@@ -544,6 +544,133 @@ def evaluate(config_path,
             print("Evaluation {}".format(k))
             print(v)
 
+
+# Brendan: This generates labels for an individual sequence.
+def generate_labels(config_path,
+             sequence,
+             model_dir=None,
+             result_path=None,
+             ckpt_path=None,
+             measure_time=False,
+             batch_size=None,
+             **kwargs):
+    """Don't support pickle_result anymore. if you want to generate kitti label file,
+    please use kitti_anno_to_label_file and convert_detection_to_kitti_annos
+    in second.data.kitti_dataset.
+    """
+    assert len(kwargs) == 0
+
+    sequence = f'{sequence:04}'
+
+    model_dir = str(Path(model_dir).resolve())
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    result_name = 'eval_results'
+    if result_path is None:
+        model_dir = Path(model_dir)
+        result_path = model_dir / result_name
+    else:
+        result_path = Path(result_path)
+    if isinstance(config_path, str):
+        # directly provide a config object. this usually used
+        # when you want to eval with several different parameters in
+        # one script.
+        config = pipeline_pb2.TrainEvalPipelineConfig()
+        with open(config_path, "r") as f:
+            proto_str = f.read()
+            text_format.Merge(proto_str, config)
+    else:
+        config = config_path
+
+    input_cfg = config.eval_input_reader
+    model_cfg = config.model.second
+    train_cfg = config.train_config
+
+    net = build_network(model_cfg, measure_time=measure_time).to(device)
+    if train_cfg.enable_mixed_precision:
+        net.half()
+        print("half inference!")
+        net.metrics_to_float()
+        net.convert_norm_to_float(net)
+    target_assigner = net.target_assigner
+    voxel_generator = net.voxel_generator
+
+    if ckpt_path is None:
+        assert model_dir is not None
+        torchplus.train.try_restore_latest_checkpoints(model_dir, [net])
+    else:
+        torchplus.train.restore(ckpt_path, net)
+    batch_size = batch_size or input_cfg.batch_size
+    eval_dataset = input_reader_builder.build(
+        input_cfg,
+        model_cfg,
+        training=False,
+        voxel_generator=voxel_generator,
+        target_assigner=target_assigner)
+    eval_dataloader = torch.utils.data.DataLoader(
+        eval_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=input_cfg.preprocess.num_workers,
+        pin_memory=False,
+        collate_fn=merge_second_batch)
+
+    if train_cfg.enable_mixed_precision:
+        float_dtype = torch.float16
+    else:
+        float_dtype = torch.float32
+
+    net.eval()
+    result_path_step = result_path / f"step_{net.get_global_step()}"
+    result_path_step.mkdir(parents=True, exist_ok=True)
+    t = time.time()
+    detections = []
+    print("Generate output labels...")
+    bar = ProgressBar()
+    bar.start((len(eval_dataset) + batch_size - 1) // batch_size)
+    prep_example_times = []
+    prep_times = []
+    t2 = time.time()
+
+    for idx, example in enumerate(iter(eval_dataloader)):
+        if measure_time:
+            prep_times.append(time.time() - t2)
+            torch.cuda.synchronize()
+            t1 = time.time()
+        example = example_convert_to_torch(example, float_dtype)
+        if measure_time:
+            torch.cuda.synchronize()
+            prep_example_times.append(time.time() - t1)
+        with torch.no_grad():
+            detections += net(example)
+        bar.print_bar()
+        if measure_time:
+            t2 = time.time()
+
+        # temp debugging
+        # if idx >= 20:
+        #     break
+
+    sec_per_example = len(eval_dataset) / (time.time() - t)
+    print(f'generate label finished({sec_per_example:.2f}/s). start eval:')
+    if measure_time:
+        print(
+            f"avg example to torch time: {np.mean(prep_example_times) * 1000:.3f} ms"
+        )
+        print(f"avg prep time: {np.mean(prep_times) * 1000:.3f} ms")
+    for name, val in net.get_avg_time_dict().items():
+        print(f"avg {name} time = {val * 1000:.3f} ms")
+    with open(result_path_step / "result.pkl", 'wb') as f:
+        pickle.dump(detections, f)
+
+    dt_annos = eval_dataset.dataset.convert_detection_to_kitti_annos(detections)
+    import second.data.kitti_dataset as kitti_ds
+
+    kitti_label_dir = result_path_step / "kitti_labels_debug"
+
+    kitti_label_dir.mkdir(exist_ok=True)
+
+    kitti_ds.kitti_anno_to_label_file_tracking(dt_annos, kitti_label_dir, sequence)
+
 def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, update_delta=0.01, num_tune_epoch=5):
     """get information of target assign to tune thresholds in anchor generator.
     """    

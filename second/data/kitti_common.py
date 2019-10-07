@@ -85,14 +85,23 @@ def get_kitti_info_path(idx,
                         file_tail='.png',
                         training=True,
                         relative_path=True,
-                        exist_check=True):
-    img_idx_str = get_image_index_str(idx)
+                        exist_check=True,
+                        sequence=None,
+                        idx_fmt="{:06d}"):
+    img_idx_str = idx_fmt.format(idx)
+    # img_idx_str = get_image_index_str(idx)
     img_idx_str += file_tail
     prefix = pathlib.Path(prefix)
     if training:
-        file_path = pathlib.Path('training') / info_type / img_idx_str
+        file_path = pathlib.Path('training') / info_type
     else:
-        file_path = pathlib.Path('testing') / info_type / img_idx_str
+        file_path = pathlib.Path('testing') / info_type
+
+    if sequence is not None and sequence != "":
+        file_path = file_path / sequence
+
+    file_path = file_path / img_idx_str
+
     if exist_check and not (prefix / file_path).exists():
         raise ValueError("file not exist: {}".format(file_path))
     if relative_path:
@@ -101,21 +110,34 @@ def get_kitti_info_path(idx,
         return str(prefix / file_path)
 
 
-def get_image_path(idx, prefix, training=True, relative_path=True, exist_check=True):
-    return get_kitti_info_path(idx, prefix, 'image_2', '.png', training,
+def get_image_path(idx, prefix, training=True, relative_path=True, exist_check=True, sequence=None):
+    if sequence is None or sequence == "":
+        return get_kitti_info_path(idx, prefix, 'image_2', '.png', training,
+                               relative_path, exist_check, sequence)
+    else:
+        return get_kitti_info_path(idx, prefix, 'image_02', '.png', training,
+                               relative_path, exist_check, sequence)
+
+def get_label_path(idx, prefix, training=True, relative_path=True, exist_check=True, sequence=None):
+    if sequence is None or sequence == "":
+        return get_kitti_info_path(idx, prefix, 'label_2', '.txt', training,
+                               relative_path, exist_check, sequence)
+    else:
+        # TODO(brendan): Need to work out how to handle labels in tracking...
+        return get_kitti_info_path(int(sequence), prefix, 'label_02', '.txt', training,
                                relative_path, exist_check)
 
-def get_label_path(idx, prefix, training=True, relative_path=True, exist_check=True):
-    return get_kitti_info_path(idx, prefix, 'label_2', '.txt', training,
-                               relative_path, exist_check)
-
-def get_velodyne_path(idx, prefix, training=True, relative_path=True, exist_check=True):
+def get_velodyne_path(idx, prefix, training=True, relative_path=True, exist_check=True, sequence=None):
     return get_kitti_info_path(idx, prefix, 'velodyne', '.bin', training,
-                               relative_path, exist_check)
+                               relative_path, exist_check, sequence)
 
-def get_calib_path(idx, prefix, training=True, relative_path=True, exist_check=True):
-    return get_kitti_info_path(idx, prefix, 'calib', '.txt', training,
-                               relative_path, exist_check)
+def get_calib_path(idx, prefix, training=True, relative_path=True, exist_check=True, sequence=None):
+    if sequence is None or sequence == "":
+        return get_kitti_info_path(idx, prefix, 'calib', '.txt', training,
+                               relative_path, exist_check, sequence)
+    else:
+        return get_kitti_info_path(int(sequence), prefix, 'calib', '.txt', training,
+                               relative_path, exist_check, idx_fmt="{:04d}")
 
 def _extend_matrix(mat):
     mat = np.concatenate([mat, np.array([[0., 0., 0., 1.]])], axis=0)
@@ -160,7 +182,8 @@ def get_kitti_image_info(path,
                          extend_matrix=True,
                          num_worker=8,
                          relative_path=True,
-                         with_imageshape=True):
+                         with_imageshape=True,
+                         sequence=None):
     # image_infos = []
     """ 
     KITTI annotation format version 2:
@@ -203,9 +226,9 @@ def get_kitti_image_info(path,
         annotations = None
         if velodyne:
             pc_info['velodyne_path'] = get_velodyne_path(
-                idx, path, training, relative_path)
+                idx, path, training, relative_path, sequence=sequence)
         image_info['image_path'] = get_image_path(idx, path, training,
-                                                relative_path)
+                                                relative_path, sequence=sequence)
         if with_imageshape:
             img_path = image_info['image_path']
             if relative_path:
@@ -213,7 +236,7 @@ def get_kitti_image_info(path,
             image_info['image_shape'] = np.array(
                 io.imread(img_path).shape[:2], dtype=np.int32)
         if label_info:
-            label_path = get_label_path(idx, path, training, relative_path)
+            label_path = get_label_path(idx, path, training, relative_path, sequence=sequence)
             if relative_path:
                 label_path = str(root_path / label_path)
             annotations = get_label_anno(label_path)
@@ -221,7 +244,7 @@ def get_kitti_image_info(path,
         info["point_cloud"] = pc_info
         if calib:
             calib_path = get_calib_path(
-                idx, path, training, relative_path=False)
+                idx, path, training, relative_path=False, sequence=sequence)
             with open(calib_path, 'r') as f:
                 lines = f.readlines()
             P0 = np.array(
@@ -522,6 +545,54 @@ def kitti_result_line(result_dict, precision=4):
                 res_dict.keys()))
     return ' '.join(res_line)
 
+
+def kitti_result_line_tracking(result_dict, precision=4):
+    prec_float = "{" + ":.{}f".format(precision) + "}"
+    res_line = []
+    all_field_default = OrderedDict([
+        ('frame', -1),
+        ('name', None),
+        ('truncated', -1),
+        ('occluded', -1),
+        ('alpha', -10),
+        ('bbox', None),
+        ('dimensions', [-1, -1, -1]),
+        ('location', [-1000, -1000, -1000]),
+        ('rotation_y', -10),
+        ('score', 0.0),
+    ])
+    res_dict = [(key, None) for key, val in all_field_default.items()]
+    res_dict = OrderedDict(res_dict)
+    for key, val in result_dict.items():
+        if all_field_default[key] is None and val is None:
+            raise ValueError("you must specify a value for {}".format(key))
+        res_dict[key] = val
+
+    for key, val in res_dict.items():
+        if key == 'frame':
+            res_line.append(str(val))
+        elif key == 'name':
+            res_line.append(val)
+        elif key in ['truncated', 'alpha', 'rotation_y', 'score']:
+            if val is None:
+                res_line.append(str(all_field_default[key]))
+            else:
+                res_line.append(prec_float.format(val))
+        elif key == 'occluded':
+            if val is None:
+                res_line.append(str(all_field_default[key]))
+            else:
+                res_line.append('{}'.format(val))
+        elif key in ['bbox', 'dimensions', 'location']:
+            if val is None:
+                res_line += [str(v) for v in all_field_default[key]]
+            else:
+                res_line += [prec_float.format(v) for v in val]
+        else:
+            raise ValueError("unknown key. supported key:{}".format(
+                res_dict.keys()))
+    return ' '.join(res_line)
+
 def annos_to_kitti_label(annos):
     num_instance = len(annos["name"])
     result_lines = []
@@ -625,6 +696,9 @@ def add_difficulty_to_annos_v2(info):
 
 
 def get_label_anno(label_path):
+
+    # TODO(brendan) may need to change for tracking dataset?
+
     annotations = {}
     annotations.update({
         'name': [],

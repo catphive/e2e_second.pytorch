@@ -294,6 +294,38 @@ def kitti_anno_to_label_file(annos, folder):
             f.write(label_str)
 
 
+def kitti_anno_to_label_file_tracking(annos, folder, sequence):
+    # Brendan: Note that this only handles a single sequence.
+    folder = Path(folder)
+
+    label_lines = []
+
+    for anno in annos:
+        image_idx = anno["metadata"]["image_idx"]
+        # label_lines = []
+        # breakpoint()
+        for j in range(anno["bbox"].shape[0]):
+            # breakpoint()
+            label_dict = {
+                'frame': image_idx,
+                'name': anno["name"][j],
+                'alpha': anno["alpha"][j],
+                'bbox': anno["bbox"][j],
+                'location': anno["location"][j],
+                'dimensions': np.flip(anno["dimensions"][j]), # pointpillar seems to be keeping dimensions in reverse order
+                'rotation_y': anno["rotation_y"][j],
+                'score': anno["score"][j],
+            }
+            label_line = kitti.kitti_result_line_tracking(label_dict)
+            label_lines.append(label_line)
+
+    label_file = folder / f"{sequence}.txt"
+    label_str = '\n'.join(label_lines)
+
+    with open(label_file, 'w') as f:
+        f.write(label_str)
+
+
 def _read_imageset_file(path):
     with open(path, 'r') as f:
         lines = f.readlines()
@@ -395,10 +427,72 @@ def create_kitti_info_file(data_path, save_path=None, relative_path=True):
         pickle.dump(kitti_infos_test, f)
 
 
+
+def create_kitti_info_file_tracking(data_path, sequence, save_path=None, relative_path=True):
+
+    train_img_ids = sorted(int(p.stem) for p in ((Path(data_path) / "training" / "velodyne" / sequence).glob("*")))
+
+    print("Generate info. this may take several minutes.")
+    if save_path is None:
+        save_path = Path(data_path)
+    else:
+        save_path = Path(save_path)
+    kitti_infos_train = kitti.get_kitti_image_info(
+        data_path,
+        training=True,
+        label_info=False, # TODO(brendan): Not handling reading labels for tracking right now.
+        velodyne=True,
+        calib=True,
+        image_ids=train_img_ids,
+        relative_path=relative_path,
+        sequence=sequence)
+
+    # TODO(brendan): seems to just adjust annos, which I'm not setting for tracking right now.
+    # _calculate_num_points_in_gt(data_path, kitti_infos_train, relative_path)
+    filename = save_path / f'kitti_infos_train{sequence}.pkl'
+    print(f"Kitti info train file is saved to {filename}")
+    with open(filename, 'wb') as f:
+        pickle.dump(kitti_infos_train, f)
+
+
+    # Brendan: Not generating infos for validation and testing
+    # Might want to add these back.
+
+    # kitti_infos_val = kitti.get_kitti_image_info(
+    #     data_path,
+    #     training=True,
+    #     velodyne=True,
+    #     calib=True,
+    #     image_ids=val_img_ids,
+    #     relative_path=relative_path)
+    # _calculate_num_points_in_gt(data_path, kitti_infos_val, relative_path)
+    # filename = save_path / 'kitti_infos_val.pkl'
+    # print(f"Kitti info val file is saved to {filename}")
+    # with open(filename, 'wb') as f:
+    #     pickle.dump(kitti_infos_val, f)
+    # filename = save_path / 'kitti_infos_trainval.pkl'
+    # print(f"Kitti info trainval file is saved to {filename}")
+    # with open(filename, 'wb') as f:
+    #     pickle.dump(kitti_infos_train + kitti_infos_val, f)
+
+    # kitti_infos_test = kitti.get_kitti_image_info(
+    #     data_path,
+    #     training=False,
+    #     label_info=False,
+    #     velodyne=True,
+    #     calib=True,
+    #     image_ids=test_img_ids,
+    #     relative_path=relative_path)
+    # filename = save_path / 'kitti_infos_test.pkl'
+    # print(f"Kitti info test file is saved to {filename}")
+    # with open(filename, 'wb') as f:
+    #     pickle.dump(kitti_infos_test, f)
+
 def _create_reduced_point_cloud(data_path,
                                 info_path,
                                 save_path=None,
-                                back=False):
+                                back=False,
+                                tracking=False):
     with open(info_path, 'rb') as f:
         kitti_infos = pickle.load(f)
     for info in prog_bar(kitti_infos):
@@ -422,8 +516,17 @@ def _create_reduced_point_cloud(data_path,
         points_v = box_np_ops.remove_outside_points(points_v, rect, Trv2c, P2,
                                                     image_info["image_shape"])
         if save_path is None:
-            save_filename = v_path.parent.parent / (
-                v_path.parent.stem + "_reduced") / v_path.name
+
+            save_filename = v_path.parent.parent
+
+            if tracking:
+                save_filename = save_filename.parent
+                stem = v_path.parent.parent.stem
+            else:
+                stem = v_path.parent.stem
+
+            save_filename = save_filename / (
+                stem + "_reduced") / v_path.name
             # save_filename = str(v_path) + '_reduced'
             if back:
                 save_filename += "_back"
@@ -440,13 +543,14 @@ def create_reduced_point_cloud(data_path,
                                val_info_path=None,
                                test_info_path=None,
                                save_path=None,
-                               with_back=False):
+                               with_back=False,
+                               sequence=""):
     if train_info_path is None:
-        train_info_path = Path(data_path) / 'kitti_infos_train.pkl'
+        train_info_path = Path(data_path) / f'kitti_infos_train{sequence}.pkl'
     if val_info_path is None:
-        val_info_path = Path(data_path) / 'kitti_infos_val.pkl'
+        val_info_path = Path(data_path) / f'kitti_infos_val{sequence}.pkl'
     if test_info_path is None:
-        test_info_path = Path(data_path) / 'kitti_infos_test.pkl'
+        test_info_path = Path(data_path) / f'kitti_infos_test{sequence}.pkl'
 
     _create_reduced_point_cloud(data_path, train_info_path, save_path)
     _create_reduced_point_cloud(data_path, val_info_path, save_path)
@@ -458,6 +562,35 @@ def create_reduced_point_cloud(data_path,
             data_path, val_info_path, save_path, back=True)
         _create_reduced_point_cloud(
             data_path, test_info_path, save_path, back=True)
+
+def create_reduced_point_cloud_tracking(data_path,
+                               train_info_path=None,
+                               val_info_path=None,
+                               test_info_path=None,
+                               save_path=None,
+                               with_back=False,
+                               sequence=""):
+    if train_info_path is None:
+        train_info_path = Path(data_path) / f'kitti_infos_train{sequence}.pkl'
+    if val_info_path is None:
+        val_info_path = Path(data_path) / f'kitti_infos_val{sequence}.pkl'
+    if test_info_path is None:
+        test_info_path = Path(data_path) / f'kitti_infos_test{sequence}.pkl'
+
+    _create_reduced_point_cloud(data_path, train_info_path, save_path, tracking=True)
+
+    # Brendan: Not generating reduced point cloud for validation
+    # and testing. Might want to add these back.
+
+    # _create_reduced_point_cloud(data_path, val_info_path, save_path)
+    # _create_reduced_point_cloud(data_path, test_info_path, save_path)
+    if with_back:
+        _create_reduced_point_cloud(
+            data_path, train_info_path, save_path, back=True, tracking=True)
+        # _create_reduced_point_cloud(
+        #     data_path, val_info_path, save_path, back=True)
+        # _create_reduced_point_cloud(
+        #     data_path, test_info_path, save_path, back=True)
 
 
 if __name__ == "__main__":
